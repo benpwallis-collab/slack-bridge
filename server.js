@@ -1,114 +1,76 @@
-import pkg from '@slack/bolt';
+import pkg from "@slack/bolt";
 const { App, ExpressReceiver } = pkg;
-import express from 'express';
-import bodyParser from 'body-parser';
-import fetch from 'node-fetch';
-import { createClient } from '@supabase/supabase-js';
+import express from "express";
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
 
 const {
   SLACK_SIGNING_SECRET,
   SLACK_BOT_TOKEN,
   LOVABLE_API_URL,
-  SUPABASE_URL,
-  SUPABASE_ANON_KEY,
-  PORT = 3000,
+  PORT = 3000
 } = process.env;
 
-const receiver = new ExpressReceiver({
-  signingSecret: SLACK_SIGNING_SECRET,
-});
+// --- Express setup for health checks ---
+const receiver = new ExpressReceiver({ signingSecret: SLACK_SIGNING_SECRET });
+receiver.app.use(bodyParser.json());
+receiver.app.get("/health", (_req, res) => res.status(200).send("ok"));
 
+// --- Initialize Slack Bolt app ---
 const app = new App({
   token: SLACK_BOT_TOKEN,
-  receiver,
+  receiver
 });
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-app.command('/ask', async ({ command, ack, respond, client }) => {
+// --- /ask command handler ---
+app.command("/ask", async ({ command, ack, respond }) => {
   await ack();
 
-  const question = (command.text || '').trim();
-  const userId = command.user_id;
+  const question = (command.text || "").trim();
+  const user = command.user_id;
 
   if (!question) {
     await respond({
-      text: 'Type a question after /ask, e.g. `/ask What is our leave policy?`',
-      response_type: 'ephemeral',
+      text: "Type a question after `/ask`, e.g. `/ask What is our leave policy?`",
+      response_type: "ephemeral"
     });
     return;
   }
 
-  // Initial feedback to user
+  // 1️⃣ Immediate feedback (always works, even in DMs)
   await respond({
-    text: '🤖 Thinking... looking up the answer securely for your org.',
-    response_type: 'ephemeral',
+    text: `⏳ Searching for: *${question}* ...`,
+    response_type: "ephemeral"
   });
 
   try {
-    // Get Slack user email
-    const userInfo = await client.users.info({ user: userId });
-    const userEmail = userInfo.user?.profile?.email;
-
-    if (!userEmail) {
-      await respond({
-        text: '❌ Could not retrieve your email from Slack. Please try again.',
-        response_type: 'ephemeral',
-      });
-      return;
-    }
-
-    // Look up tenant_id in Supabase
-    const { data: userRow, error } = await supabase
-      .from('user_roles')
-      .select('tenant_id')
-      .eq('email', userEmail)
-      .single();
-
-    if (error || !userRow?.tenant_id) {
-      await respond({
-        text: '❌ You are not assigned to an organization yet. Ask an admin to invite you properly.',
-        response_type: 'ephemeral',
-      });
-      return;
-    }
-
-    const tenantId = userRow.tenant_id;
-
-    // Call Lovable RAG backend
-    const res = await fetch(`${LOVABLE_API_URL}/functions/v1/rag-query`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-      },
-      body: JSON.stringify({
-        question,
-        userEmail,
-        tenantId, // 🟢 Important!
-      }),
+    // 2️⃣ Call Lovable backend
+    const res = await fetch(LOVABLE_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, user })
     });
 
     const data = await res.json().catch(() => ({}));
-    const text = data.answer || data.text || '⚠️ No answer found.';
+    const text = data.answer || data.text || "No answer found.";
 
+    // 3️⃣ Respond with final answer
     await respond({
-      text,
-      response_type: 'ephemeral',
+      text: `💡 *Answer to:* ${question}\n\n${text}`,
+      response_type: "ephemeral"
     });
-  } catch (e) {
-    console.error('Slack bridge error:', e);
+
+  } catch (error) {
+    console.error("Slack bridge error:", error);
     await respond({
-      text: '❌ Something went wrong talking to the knowledge system.',
-      response_type: 'ephemeral',
+      text: "❌ Sorry, something went wrong talking to the knowledge service.",
+      response_type: "ephemeral"
     });
   }
 });
 
-receiver.app.use(bodyParser.json());
-receiver.app.get('/health', (_req, res) => res.status(200).send('ok'));
-
+// --- Start the Bolt app ---
 (async () => {
   await app.start(PORT);
-  console.log(`Slack bridge running on port ${PORT}`);
+  console.log(`⚡️ Slack bridge running on port ${PORT}`);
 })();

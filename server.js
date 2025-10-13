@@ -12,6 +12,9 @@ const {
   PORT = 3000
 } = process.env;
 
+// ✅ Log TENANT_ID at startup
+console.log('✅ Loaded TENANT_ID:', TENANT_ID);
+
 // Setup receiver
 const receiver = new ExpressReceiver({
   signingSecret: SLACK_SIGNING_SECRET

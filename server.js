@@ -56,6 +56,7 @@ app.command("/ask", async ({ command, ack, respond }) => {
 
   try {
     console.log(`Received /ask from ${command.user_name}: ${question}`);
+    console.log("LOVABLE_API_URL =", LOVABLE_API_URL);
     const res = await fetch(LOVABLE_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

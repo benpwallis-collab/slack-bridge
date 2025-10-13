@@ -1,4 +1,6 @@
-import { App, ExpressReceiver } from '@slack/bolt';
+import pkg from '@slack/bolt';
+const { App, ExpressReceiver } = pkg;
+
 import fetch from 'node-fetch';
 import express from 'express';
 

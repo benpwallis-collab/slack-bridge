@@ -1,77 +1,76 @@
-import pkg from '@slack/bolt';
+import pkg from "@slack/bolt";
 const { App, ExpressReceiver } = pkg;
+import express from "express";
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
 
-import fetch from 'node-fetch';
-import express from 'express';
+const {
+  SLACK_SIGNING_SECRET,
+  SLACK_BOT_TOKEN,
+  LOVABLE_API_URL,
+  PORT = 3000
+} = process.env;
 
-const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-const LOVABLE_API_URL = process.env.LOVABLE_API_URL;
-const TENANT_ID = process.env.TENANT_ID;
-const PORT = process.env.PORT || 3000;
+// --- Express setup for health checks ---
+const receiver = new ExpressReceiver({ signingSecret: SLACK_SIGNING_SECRET });
+receiver.app.use(bodyParser.json());
+receiver.app.get("/health", (_req, res) => res.status(200).send("ok"));
 
-console.log('✅ Loaded TENANT_ID:', TENANT_ID);
-
-const receiver = new ExpressReceiver({
-  signingSecret: SLACK_SIGNING_SECRET,
-});
-
+// --- Initialize Slack Bolt app ---
 const app = new App({
   token: SLACK_BOT_TOKEN,
-  receiver,
+  receiver
 });
 
-// Slack command handler
-app.command('/ask', async ({ command, ack, client }) => {
+// --- /ask command handler ---
+app.command("/ask", async ({ command, ack, respond }) => {
   await ack();
 
+  const question = (command.text || "").trim();
+  const user = command.user_id;
+
+  if (!question) {
+    await respond({
+      text: "Type a question after `/ask`, e.g. `/ask What is our leave policy?`",
+      response_type: "ephemeral"
+    });
+    return;
+  }
+
+  // 1️⃣ Immediate feedback (always works, even in DMs)
+  await respond({
+    text: `⏳ Searching for: *${question}* ...`,
+    response_type: "ephemeral"
+  });
+
   try {
-    // 1. Send immediate processing message and capture the message timestamp + channel
-    const interim = await client.chat.postMessage({
-      channel: command.channel_id,
-      text: '🔍 Processing your question, please wait...',
+    // 2️⃣ Call Lovable backend
+    const res = await fetch(LOVABLE_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, user })
     });
 
-    const responseUrl = `${LOVABLE_API_URL}/ask`;
-    const payload = {
-      question: command.text,
-      user: command.user_id,
-      tenantId: TENANT_ID,
-    };
+    const data = await res.json().catch(() => ({}));
+    const text = data.answer || data.text || "No answer found.";
 
-    console.log('📤 Sending request to Lovable with tenantId:', payload.tenantId);
-
-    const res = await fetch(responseUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+    // 3️⃣ Respond with final answer
+    await respond({
+      text: `💡 *Answer to:* ${question}\n\n${text}`,
+      response_type: "ephemeral"
     });
 
-    const result = await res.json();
-    const answer = result.answer || '⚠️ No answer found. Please check with HR or IT.';
-
-    // 2. Update the original message with the real answer
-    await client.chat.update({
-      channel: interim.channel,
-      ts: interim.ts,
-      text: answer,
+  } catch (error) {
+    console.error("Slack bridge error:", error);
+    await respond({
+      text: "❌ Sorry, something went wrong talking to the knowledge service.",
+      response_type: "ephemeral"
     });
-
-  } catch (err) {
-    console.error('❌ Error handling /ask command:', err);
-
-    try {
-      // Send fallback error message if we can't update
-      await client.chat.postMessage({
-        channel: command.channel_id,
-        text: '⚠️ There was an error while processing your question.',
-      });
-    } catch (e) {
-      console.error('💥 Failed to send fallback error message:', e);
-    }
   }
 });
 
-receiver.app.listen(PORT, () => {
-  console.log(`🚀 Slack bridge is running on port ${PORT}`);
-});
+// --- Start the Bolt app ---
+(async () => {
+  await app.start(PORT);
+  console.log(`⚡️ Slack bridge running on port ${PORT}`);
+})();

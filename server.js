@@ -1,89 +1,75 @@
-import pkg from '@slack/bolt';
-const { App, ExpressReceiver } = pkg;
-import express from 'express';
-import bodyParser from 'body-parser';
+import { App, ExpressReceiver } from '@slack/bolt';
 import fetch from 'node-fetch';
+import express from 'express';
 
-const {
-  SLACK_SIGNING_SECRET,
-  SLACK_BOT_TOKEN,
-  LOVABLE_API_URL,
-  TENANT_ID,
-  PORT = 3000
-} = process.env;
+const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+const LOVABLE_API_URL = process.env.LOVABLE_API_URL;
+const TENANT_ID = process.env.TENANT_ID;
+const PORT = process.env.PORT || 3000;
 
-// ✅ Log TENANT_ID at startup
 console.log('✅ Loaded TENANT_ID:', TENANT_ID);
 
-// Setup receiver
 const receiver = new ExpressReceiver({
-  signingSecret: SLACK_SIGNING_SECRET
+  signingSecret: SLACK_SIGNING_SECRET,
 });
 
-// Setup Bolt app
 const app = new App({
   token: SLACK_BOT_TOKEN,
-  receiver
+  receiver,
 });
 
-// Slash command: /ask
-app.command('/ask', async ({ command, ack, respond, client }) => {
+// Slack command handler
+app.command('/ask', async ({ command, ack, client }) => {
   await ack();
 
-  const question = (command.text || '').trim();
-
-  if (!question) {
-    await respond({
-      text: "Type a question after /ask, e.g. `/ask What is our leave policy?`",
-      response_type: "ephemeral"
-    });
-    return;
-  }
-
-  // Send immediate feedback to Slack user
-  const processingMessage = await respond({
-    text: "_Processing your question..._",
-    response_type: "ephemeral"
-  });
-
   try {
-    console.log("Sending request to Lovable with tenantId:", TENANT_ID);
-    const res = await fetch(LOVABLE_API_URL, {
+    // 1. Send immediate processing message and capture the message timestamp + channel
+    const interim = await client.chat.postMessage({
+      channel: command.channel_id,
+      text: '🔍 Processing your question, please wait...',
+    });
+
+    const responseUrl = `${LOVABLE_API_URL}/ask`;
+    const payload = {
+      question: command.text,
+      user: command.user_id,
+      tenantId: TENANT_ID,
+    };
+
+    console.log('📤 Sending request to Lovable with tenantId:', payload.tenantId);
+
+    const res = await fetch(responseUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question,
-        user: command.user_id,
-        tenantId: TENANT_ID
-      })
+      body: JSON.stringify(payload),
     });
 
-    const data = await res.json().catch(() => ({}));
-    const text = data.answer || data.text || "No answer found.";
+    const result = await res.json();
+    const answer = result.answer || '⚠️ No answer found. Please check with HR or IT.';
 
-    // Replace processing message with answer
+    // 2. Update the original message with the real answer
     await client.chat.update({
-      channel: command.channel_id,
-      ts: processingMessage.ts,
-      text,
+      channel: interim.channel,
+      ts: interim.ts,
+      text: answer,
     });
 
-  } catch (e) {
-    console.error("Error querying Lovable:", e);
-    await client.chat.update({
-      channel: command.channel_id,
-      ts: processingMessage.ts,
-      text: "⚠️ Sorry, something went wrong talking to the knowledge service."
-    });
+  } catch (err) {
+    console.error('❌ Error handling /ask command:', err);
+
+    try {
+      // Send fallback error message if we can't update
+      await client.chat.postMessage({
+        channel: command.channel_id,
+        text: '⚠️ There was an error while processing your question.',
+      });
+    } catch (e) {
+      console.error('💥 Failed to send fallback error message:', e);
+    }
   }
 });
 
-// Health check
-receiver.app.use(bodyParser.json());
-receiver.app.get('/health', (_req, res) => res.status(200).send('ok'));
-
-// Start app
-(async () => {
-  await app.start(PORT);
-  console.log(`Slack bridge running on port ${PORT}`);
-})();
+receiver.app.listen(PORT, () => {
+  console.log(`🚀 Slack bridge is running on port ${PORT}`);
+});

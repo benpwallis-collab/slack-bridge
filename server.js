@@ -7,6 +7,7 @@ import fetch from "node-fetch";
 const {
   SLACK_SIGNING_SECRET,
   SLACK_BOT_TOKEN,
+  TENANT_ID,
   LOVABLE_API_URL,
   PORT = 3000
 } = process.env;

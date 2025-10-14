@@ -43,7 +43,7 @@ app.command("/ask", async ({ command, ack, respond }) => {
   });
 
   try {
-    // 2. Look up tenant ID via Lovable function
+    // 2. Look up tenant ID
     console.log(`🔍 Looking up tenant for Slack team: ${teamId}`);
     const tenantRes = await fetch(SLACK_TENANT_LOOKUP_URL, {
       method: "POST",
@@ -60,7 +60,7 @@ app.command("/ask", async ({ command, ack, respond }) => {
 
     const { tenant_id } = await tenantRes.json();
 
-    // 3. Send question to Lovable RAG endpoint
+    // 3. Query Lovable RAG
     const ragRes = await fetch(RAG_QUERY_URL, {
       method: "POST",
       headers: {
@@ -70,16 +70,32 @@ app.command("/ask", async ({ command, ack, respond }) => {
       },
       body: JSON.stringify({
         question,
-        userEmail: userId  // You can also map to email later
+        userEmail: userId // Can be mapped to actual email
       })
     });
 
     const ragData = await ragRes.json();
     const answer = ragData.answer || ragData.text || "No answer found.";
 
-    // 4. Final response
+    // 4. Format sources
+    const sources = ragData.sources || [];
+    const sourcesList = sources.map(s => {
+      const title = s.title;
+      const updated = s.updated_at;
+      const url = s.url;
+      if (url) {
+        return `• <${url}|${title}> (Updated: ${updated})`;
+      } else {
+        return `• ${title} (Updated: ${updated})`;
+      }
+    });
+    const sourcesText = sourcesList.length > 0
+      ? `\n\n*Sources:*\n${sourcesList.join("\n")}`
+      : "";
+
+    // 5. Final response
     await respond({
-      text: `💡 *Answer to:* ${question}\n\n${answer}`,
+      text: `💡 *Answer to:* ${question}\n\n${answer}${sourcesText}`,
       response_type: "ephemeral"
     });
 

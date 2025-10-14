@@ -1,79 +1,76 @@
-// server.js
-import pkg from '@slack/bolt';
+import pkg from "@slack/bolt";
 const { App, ExpressReceiver } = pkg;
-import fetch from 'node-fetch';
-import { createClient } from '@supabase/supabase-js';
+import express from "express";
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
 
-const expressReceiver = new ExpressReceiver({
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-});
+const {
+  SLACK_SIGNING_SECRET,
+  SLACK_BOT_TOKEN,
+  LOVABLE_API_URL,
+  PORT = 3000
+} = process.env;
 
+// --- Express setup for health checks ---
+const receiver = new ExpressReceiver({ signingSecret: SLACK_SIGNING_SECRET });
+receiver.app.use(bodyParser.json());
+receiver.app.get("/health", (_req, res) => res.status(200).send("ok"));
+
+// --- Initialize Slack Bolt app ---
 const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  receiver: expressReceiver,
+  token: SLACK_BOT_TOKEN,
+  receiver
 });
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-async function getTenantIdBySlackTeamId(teamId) {
-  const { data, error } = await supabase
-    .from('tenants')
-    .select('id')
-    .eq('slack_team_id', teamId)
-    .single();
-
-  if (error || !data) {
-    console.error('❌ Tenant not found for team:', teamId, error);
-    throw new Error(`Tenant not found for Slack team: ${teamId}`);
-  }
-
-  return data.id;
-}
-
-app.command('/ask', async ({ command, ack, respond, client }) => {
+// --- /ask command handler ---
+app.command("/ask", async ({ command, ack, respond }) => {
   await ack();
 
-  // 🧠 Log the Slack team_id (copy this from Render logs to update Supabase)
-  console.log('🌍 Slack team_id:', command.team_id);
-  console.log('👤 Slack user_id:', command.user_id);
-  console.log('💬 Question asked:', command.text);
+  const question = (command.text || "").trim();
+  const user = command.user_id;
+
+  if (!question) {
+    await respond({
+      text: "Type a question after `/ask`, e.g. `/ask What is our leave policy?`",
+      response_type: "ephemeral"
+    });
+    return;
+  }
+
+  // 1️⃣ Immediate feedback (always works, even in DMs)
+  await respond({
+    text: `⏳ Searching for: *${question}* ...`,
+    response_type: "ephemeral"
+  });
 
   try {
-    await respond({ text: '🤖 Processing your question...' });
-
-    const tenantId = await getTenantIdBySlackTeamId(command.team_id);
-
-    const response = await fetch(`${process.env.LOVABLE_API_URL}/rag-query`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-tenant-id': tenantId,
-      },
-      body: JSON.stringify({
-        question: command.text,
-        userEmail: command.user_id, // Or fetch actual email if needed
-      }),
+    // 2️⃣ Call Lovable backend
+    const res = await fetch(LOVABLE_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, user })
     });
 
-    const data = await response.json();
+    const data = await res.json().catch(() => ({}));
+    const text = data.answer || data.text || "No answer found.";
 
-    await client.chat.postMessage({
-      channel: command.channel_id,
-      text: data.answer || 'No answer found.',
-      thread_ts: command.ts,
-    });
-  } catch (error) {
-    console.error('❗ Error handling /ask:', error);
+    // 3️⃣ Respond with final answer
     await respond({
-      text: '⚠️ Sorry, I couldn’t process your request. Please try again or contact support.',
+      text: `💡 *Answer to:* ${question}\n\n${text}`,
+      response_type: "ephemeral"
+    });
+
+  } catch (error) {
+    console.error("Slack bridge error:", error);
+    await respond({
+      text: "❌ Sorry, something went wrong talking to the knowledge service.",
+      response_type: "ephemeral"
     });
   }
 });
 
+// --- Start the Bolt app ---
 (async () => {
-  await app.start(process.env.PORT || 3000);
-  console.log('⚡️ Slack Bolt app is running!');
+  await app.start(PORT);
+  console.log(`⚡️ Slack bridge running on port ${PORT}`);
 })();

@@ -90,8 +90,12 @@ app.command("/ask", async ({ command, ack, respond }) => {
     });
 
     const ragData = await ragRes.json();
-    const answer = ragData.answer || ragData.text || "No answer found.";
 
+    // ✅ Adjusted logic — strip embedded sources from answer
+    let answer = ragData.answer || ragData.text || "No answer found.";
+    answer = answer.replace(/\n?\*?Sources?:\n[\s\S]*/gi, "").trim();
+
+    // Format sources
     let sourcesText = "";
     const sources = ragData.sources || [];
 
@@ -122,9 +126,9 @@ app.command("/ask", async ({ command, ack, respond }) => {
       response_type: "ephemeral"
     });
   }
-}); // ✅ properly closed
+});
 
 (async () => {
   await app.start(PORT);
   console.log(`⚡️ Slack bridge running on port ${PORT}`);
-})(); // ✅ also closed
+})();

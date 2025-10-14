@@ -26,8 +26,8 @@ function getRelativeDate(dateString) {
 
   if (days > 1) return `${days} days ago`;
   if (days === 1) return `1 day ago`;
-  if (hours >= 1) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-  if (minutes >= 1) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+  if (hours >= 1) return `${hours} hour${hours > 1 ? "s" : ""} ago`;
+  if (minutes >= 1) return `${minutes} minute${minutes > 1 ? "s" : ""} ago`;
   return `just now`;
 }
 
@@ -54,20 +54,18 @@ app.command("/ask", async ({ command, ack, respond }) => {
     return;
   }
 
-  // 1. Immediate feedback
   await respond({
     text: `⏳ Searching for: *${question}* ...`,
     response_type: "ephemeral"
   });
 
   try {
-    // 2. Look up tenant ID via Lovable function
     console.log(`🔍 Looking up tenant for Slack team: ${teamId}`);
     const tenantRes = await fetch(SLACK_TENANT_LOOKUP_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "apikey": SUPABASE_ANON_KEY
+        apikey: SUPABASE_ANON_KEY
       },
       body: JSON.stringify({ slack_team_id: teamId })
     });
@@ -78,24 +76,22 @@ app.command("/ask", async ({ command, ack, respond }) => {
 
     const { tenant_id } = await tenantRes.json();
 
-    // 3. Send question to Lovable RAG endpoint
     const ragRes = await fetch(RAG_QUERY_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "apikey": SUPABASE_ANON_KEY,
+        apikey: SUPABASE_ANON_KEY,
         "x-tenant-id": tenant_id
       },
       body: JSON.stringify({
         question,
-        userEmail: userId  // You can also map to email later
+        userEmail: userId
       })
     });
 
     const ragData = await ragRes.json();
     const answer = ragData.answer || ragData.text || "No answer found.";
 
-    // 4. Format sources (if any)
     let sourcesText = "";
     const sources = ragData.sources || [];
 
@@ -115,12 +111,10 @@ app.command("/ask", async ({ command, ack, respond }) => {
       sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
     }
 
-    // 5. Final Slack message
     await respond({
       text: `💡 *Answer to:* ${question}\n\n${answer}${sourcesText}`,
       response_type: "ephemeral"
     });
-
   } catch (error) {
     console.error("Slack bridge error:", error);
     await respond({
@@ -128,10 +122,9 @@ app.command("/ask", async ({ command, ack, respond }) => {
       response_type: "ephemeral"
     });
   }
-});
+}); // ✅ properly closed
 
-// Start app
 (async () => {
   await app.start(PORT);
   console.log(`⚡️ Slack bridge running on port ${PORT}`);
-})();
+})(); // ✅ also closed

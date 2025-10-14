@@ -1,33 +1,32 @@
 import pkg from "@slack/bolt";
 const { App, ExpressReceiver } = pkg;
-import express from "express";
-import bodyParser from "body-parser";
 import fetch from "node-fetch";
+import bodyParser from "body-parser";
 
+// ENV
 const {
   SLACK_SIGNING_SECRET,
   SLACK_BOT_TOKEN,
-  LOVABLE_API_URL,
+  SLACK_TENANT_LOOKUP_URL,
+  RAG_QUERY_URL,
+  SUPABASE_ANON_KEY,
   PORT = 3000
 } = process.env;
 
-// --- Express setup for health checks ---
+// Express health check
 const receiver = new ExpressReceiver({ signingSecret: SLACK_SIGNING_SECRET });
 receiver.app.use(bodyParser.json());
 receiver.app.get("/health", (_req, res) => res.status(200).send("ok"));
 
-// --- Initialize Slack Bolt app ---
-const app = new App({
-  token: SLACK_BOT_TOKEN,
-  receiver
-});
+// Slack Bolt app
+const app = new App({ token: SLACK_BOT_TOKEN, receiver });
 
-// --- /ask command handler ---
 app.command("/ask", async ({ command, ack, respond }) => {
   await ack();
 
   const question = (command.text || "").trim();
-  const user = command.user_id;
+  const userId = command.user_id;
+  const teamId = command.team_id;
 
   if (!question) {
     await respond({
@@ -37,39 +36,62 @@ app.command("/ask", async ({ command, ack, respond }) => {
     return;
   }
 
-  // 1️⃣ Immediate feedback (always works, even in DMs)
+  // 1. Immediate feedback
   await respond({
     text: `⏳ Searching for: *${question}* ...`,
     response_type: "ephemeral"
   });
 
   try {
-    // 2️⃣ Call Lovable backend
-    const res = await fetch(LOVABLE_API_URL, {
+    // 2. Look up tenant ID via Lovable function
+    console.log(`🔍 Looking up tenant for Slack team: ${teamId}`);
+    const tenantRes = await fetch(SLACK_TENANT_LOOKUP_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, user })
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY
+      },
+      body: JSON.stringify({ slack_team_id: teamId })
     });
 
-    const data = await res.json().catch(() => ({}));
-    const text = data.answer || data.text || "No answer found.";
+    if (!tenantRes.ok) {
+      throw new Error(`Failed to resolve tenant. Status: ${tenantRes.status}`);
+    }
 
-    // 3️⃣ Respond with final answer
+    const { tenant_id } = await tenantRes.json();
+
+    // 3. Send question to Lovable RAG endpoint
+    const ragRes = await fetch(RAG_QUERY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+        "x-tenant-id": tenant_id
+      },
+      body: JSON.stringify({
+        question,
+        userEmail: userId  // You can also map to email later
+      })
+    });
+
+    const ragData = await ragRes.json();
+    const answer = ragData.answer || ragData.text || "No answer found.";
+
+    // 4. Final response
     await respond({
-      text: `💡 *Answer to:* ${question}\n\n${text}`,
+      text: `💡 *Answer to:* ${question}\n\n${answer}`,
       response_type: "ephemeral"
     });
 
   } catch (error) {
     console.error("Slack bridge error:", error);
     await respond({
-      text: "❌ Sorry, something went wrong talking to the knowledge service.",
+      text: "❌ Sorry, something went wrong while processing your question.",
       response_type: "ephemeral"
     });
   }
 });
 
-// --- Start the Bolt app ---
 (async () => {
   await app.start(PORT);
   console.log(`⚡️ Slack bridge running on port ${PORT}`);

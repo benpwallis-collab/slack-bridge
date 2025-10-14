@@ -78,20 +78,24 @@ app.command("/ask", async ({ command, ack, respond }) => {
     const answer = ragData.answer || ragData.text || "No answer found.";
 
     // 4. Format sources
-    const sources = ragData.sources || [];
-    const sourcesList = sources.map(s => {
-      const title = s.title;
-      const updated = s.updated_at;
-      const url = s.url;
-      if (url) {
-        return `• <${url}|${title}> (Updated: ${updated})`;
-      } else {
-        return `• ${title} (Updated: ${updated})`;
-      }
-    });
-    const sourcesText = sourcesList.length > 0
-      ? `\n\n*Sources:*\n${sourcesList.join("\n")}`
-      : "";
+  const sources = ragData.sources || [];
+let sourcesText = "";
+
+if (sources.length > 0) {
+  const sourcesList = sources.map((s) => {
+    const title = s.title;
+    const updated = s.updated_at?.split("T")[0]; // Trim time, keep YYYY-MM-DD
+    const url = s.url;
+
+    if (url) {
+      return `• <${url}|${title}> (Updated: ${updated})`;
+    } else {
+      return `• ${title} (Updated: ${updated})`;
+    }
+  });
+
+  sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
+}
 
     // 5. Final response
     await respond({
@@ -109,6 +113,7 @@ app.command("/ask", async ({ command, ack, respond }) => {
 });
 
 (async () => {
-  await app.start(PORT);
-  console.log(`⚡️ Slack bridge running on port ${PORT}`);
-})();
+  await respond({
+  text: `💡 *Answer to:* ${question}\n\n${answer}${sourcesText}`,
+  response_type: "ephemeral"
+});

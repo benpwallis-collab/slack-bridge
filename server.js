@@ -31,10 +31,6 @@ function getRelativeDate(dateString) {
   return `just now`;
 }
 
-console.log(`✅ Slack user email resolved: ${userEmail}`);
-console.log(`🏢 Tenant resolved: ${tenant_id}`);
-console.log(`📤 Sending query with userEmail: ${userEmail}`);
-
 // Express health check
 const receiver = new ExpressReceiver({ signingSecret: SLACK_SIGNING_SECRET });
 receiver.app.use(bodyParser.json());

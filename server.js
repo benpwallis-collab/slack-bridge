@@ -39,6 +39,7 @@ receiver.app.get("/health", (_req, res) => res.status(200).send("ok"));
 // Slack Bolt app
 const app = new App({ token: SLACK_BOT_TOKEN, receiver });
 
+// Slash command: /ask
 app.command("/ask", async ({ command, ack, respond }) => {
   await ack();
 
@@ -60,6 +61,22 @@ app.command("/ask", async ({ command, ack, respond }) => {
   });
 
   try {
+    // 🔹 Step 1: Fetch Slack user email
+    console.log(`👤 Resolving Slack email for user: ${userId}`);
+    const userRes = await fetch(`https://slack.com/api/users.info?user=${userId}`, {
+      headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` }
+    });
+    const userData = await userRes.json();
+
+    if (!userData.ok) {
+      console.error("⚠️ Slack API error:", userData.error);
+      throw new Error(`Slack API error: ${userData.error}`);
+    }
+
+    const userEmail = userData.user?.profile?.email || `${userId}@unknown.slack`;
+    console.log(`✅ Slack user email resolved: ${userEmail}`);
+
+    // 🔹 Step 2: Resolve tenant by Slack team ID
     console.log(`🔍 Looking up tenant for Slack team: ${teamId}`);
     const tenantRes = await fetch(SLACK_TENANT_LOOKUP_URL, {
       method: "POST",
@@ -75,7 +92,10 @@ app.command("/ask", async ({ command, ack, respond }) => {
     }
 
     const { tenant_id } = await tenantRes.json();
+    console.log(`🏢 Tenant resolved: ${tenant_id}`);
 
+    // 🔹 Step 3: Query InnsynAI / RAG endpoint
+    console.log(`🤖 Sending RAG query for user ${userEmail}`);
     const ragRes = await fetch(RAG_QUERY_URL, {
       method: "POST",
       headers: {
@@ -85,17 +105,20 @@ app.command("/ask", async ({ command, ack, respond }) => {
       },
       body: JSON.stringify({
         question,
-        userEmail: userId
+        userEmail
       })
     });
 
+    if (!ragRes.ok) {
+      throw new Error(`RAG query failed. Status: ${ragRes.status}`);
+    }
+
     const ragData = await ragRes.json();
 
-    // ✅ Adjusted logic — strip embedded sources from answer
+    // ✅ Format the response
     let answer = ragData.answer || ragData.text || "No answer found.";
     answer = answer.replace(/\n?\*?Sources?:\n[\s\S]*/gi, "").trim();
 
-    // Format sources
     let sourcesText = "";
     const sources = ragData.sources || [];
 
@@ -120,7 +143,7 @@ app.command("/ask", async ({ command, ack, respond }) => {
       response_type: "ephemeral"
     });
   } catch (error) {
-    console.error("Slack bridge error:", error);
+    console.error("❌ Slack bridge error:", error);
     await respond({
       text: "❌ Sorry, something went wrong while processing your question.",
       response_type: "ephemeral"
@@ -128,6 +151,7 @@ app.command("/ask", async ({ command, ack, respond }) => {
   }
 });
 
+// Start app
 (async () => {
   await app.start(PORT);
   console.log(`⚡️ Slack bridge running on port ${PORT}`);

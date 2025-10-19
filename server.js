@@ -103,14 +103,10 @@ app.command("/ask", async ({ command, ack, respond }) => {
     let answer = ragData.answer || ragData.text || "No answer found.";
 
     answer = answer
-      // Remove explicit "Source:" or "Sources:" blocks
-      .replace(/\n?\*?\s*Source[s]?:[\s\S]*/gi, "")
-      .replace(/\*\*Source:[\s\S]*/gi, "")
-      .replace(/- Source:.*/gi, "")
-      .replace(/• Source:.*/gi, "")
-      // Remove stray bullet/asterisk lines mentioning docs or updates
+      // Remove any explicit or inline "Source:" / "Sources:" and everything after
+      .replace(/Source[s]?:[\s\S]*/gi, "")
+      // Remove bullet/asterisk document lines like "* docname, Updated..."
       .replace(/\n[\*\-•]\s*[A-Za-z0-9_\-().,\s]+(Updated|No Link Available|Link|http).*$/gim, "")
-      // Handle lines like "* docname, Updated: ..."
       .replace(/\n\*\s*[A-Za-z0-9_\-().,\s]+Updated:[^\n]*/gim, "")
       .trim();
 

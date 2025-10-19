@@ -99,15 +99,19 @@ app.command("/ask", async ({ command, ack, respond }) => {
 
     const ragData = await ragRes.json();
 
-    // ✅ Clean the answer to remove embedded source info
+    // ✅ Clean the answer to remove embedded or duplicate source info
     let answer = ragData.answer || ragData.text || "No answer found.";
 
-    // Remove any embedded or duplicated source lines
     answer = answer
+      // Remove explicit "Source:" or "Sources:" blocks
       .replace(/\n?\*?\s*Source[s]?:[\s\S]*/gi, "")
       .replace(/\*\*Source:[\s\S]*/gi, "")
       .replace(/- Source:.*/gi, "")
       .replace(/• Source:.*/gi, "")
+      // Remove stray bullet/asterisk lines mentioning docs or updates
+      .replace(/\n[\*\-•]\s*[A-Za-z0-9_\-().,\s]+(Updated|No Link Available|Link|http).*$/gim, "")
+      // Handle lines like "* docname, Updated: ..."
+      .replace(/\n\*\s*[A-Za-z0-9_\-().,\s]+Updated:[^\n]*/gim, "")
       .trim();
 
     // Format sources

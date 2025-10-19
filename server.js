@@ -39,16 +39,16 @@ receiver.app.get("/health", (_req, res) => res.status(200).send("ok"));
 // Slack Bolt app
 const app = new App({ token: SLACK_BOT_TOKEN, receiver });
 
+// Slash command: /ask
 app.command("/ask", async ({ command, ack, respond }) => {
   await ack();
 
   const question = (command.text || "").trim();
-  const userId = command.user_id;
   const teamId = command.team_id;
 
   if (!question) {
     await respond({
-      text: "Type a question after /ask, e.g. /ask What is our leave policy?",
+      text: "Type a question after `/ask`, e.g. `/ask What is our leave policy?`",
       response_type: "ephemeral"
     });
     return;
@@ -75,6 +75,17 @@ app.command("/ask", async ({ command, ack, respond }) => {
     }
 
     const { tenant_id } = await tenantRes.json();
+    console.log(`🏢 Tenant resolved: ${tenant_id}`);
+
+    // 🔹 Step 3: Query InnsynAI / RAG endpoint (SIMPLIFIED)
+    console.log(`📤 Sending query to RAG`);
+    console.log(`🪵 LOG: RAG query endpoint: ${RAG_QUERY_URL}`);
+
+    const payload = {
+      question,
+      source: "slack"
+    };
+    console.log("🪵 LOG: RAG payload keys:", Object.keys(payload));
 
     const ragRes = await fetch(RAG_QUERY_URL, {
       method: "POST",
@@ -83,7 +94,7 @@ app.command("/ask", async ({ command, ack, respond }) => {
         apikey: SUPABASE_ANON_KEY,
         "x-tenant-id": tenant_id
       },
-      body: JSON.stringify({ question, userEmail: userId })
+      body: JSON.stringify(payload)
     });
 
     const ragData = await ragRes.json();

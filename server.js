@@ -43,6 +43,9 @@ const app = new App({ token: SLACK_BOT_TOKEN, receiver });
 app.command("/ask", async ({ command, ack, respond }) => {
   await ack();
 
+  console.log("✅ /ask acknowledged to Slack");
+await respond({ text: "⚙️ Working on it...", response_type: "ephemeral" });
+
   const question = (command.text || "").trim();
   const teamId = command.team_id;
 

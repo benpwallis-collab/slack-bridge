@@ -40,7 +40,6 @@ const app = new App({ token: SLACK_BOT_TOKEN, receiver });
 
 // Slash command: /ask
 app.command("/ask", async ({ command, ack, respond }) => {
-  // --- Immediate ACK + debug ---
   await ack();
   console.log("✅ /ask acknowledged to Slack:", command.text);
   await respond({
@@ -48,7 +47,6 @@ app.command("/ask", async ({ command, ack, respond }) => {
     response_type: "ephemeral"
   });
 
-  // --- Run heavy logic asynchronously to avoid Slack timeout ---
   (async () => {
     const question = (command.text || "").trim();
     const teamId = command.team_id;
@@ -79,15 +77,11 @@ app.command("/ask", async ({ command, ack, respond }) => {
       const { tenant_id } = await tenantRes.json();
       console.log(`🏢 Tenant resolved: ${tenant_id}`);
 
-      // --- RAG query with timeout ---
-      console.log(`📤 Sending query to RAG`);
-      console.log(`🪵 LOG: RAG query endpoint: ${RAG_QUERY_URL}`);
-
       const payload = { question, source: "slack" };
       console.log("🪵 LOG: RAG payload keys:", Object.keys(payload));
 
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000); // 10 s timeout
+      const timeout = setTimeout(() => controller.abort(), 10000);
 
       let ragData;
       try {
@@ -105,32 +99,21 @@ app.command("/ask", async ({ command, ack, respond }) => {
 
         console.log("📥 RAG status:", ragRes.status);
         ragData = await ragRes.json();
-        console.log("📄 RAG response keys:", Object.keys(ragData));
       } catch (err) {
         clearTimeout(timeout);
-        console.error("❌ RAG fetch failed or timed out:", err);
+        console.error("❌ RAG fetch failed:", err);
         await respond({
-          text: "⚠️ The RAG service didn’t respond (timeout or network error).",
+          text: "⚠️ RAG service didn’t respond.",
           response_type: "ephemeral"
         });
         return;
       }
 
-      // --- Parse and clean answer ---
       let answer = ragData.answer || ragData.text || "No answer found.";
       answer = answer
         .replace(/Source[s]?:[\s\S]*/gi, "")
-        .replace(
-          /\n[\*\-•]\s*[A-Za-z0-9_\-().,\s]+(Updated|No Link Available|Link|http).*$/gim,
-          ""
-        )
-        .replace(
-          /\n\*\s*[A-Za-z0-9_\-().,\s]+Updated:[^\n]*/gim,
-          ""
-        )
         .trim();
 
-      // --- Format sources ---
       let sourcesText = "";
       const sources = ragData.sources || [];
       if (sources.length > 0) {
@@ -145,25 +128,22 @@ app.command("/ask", async ({ command, ack, respond }) => {
         sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
       }
 
-      // --- Respond to Slack ---
       await respond({
         text: `💡 *Answer to:* ${question}\n\n${answer}${sourcesText}`,
         response_type: "ephemeral"
       });
-      console.log("🟩 Response sent to Slack successfully");
     } catch (error) {
       console.error("❌ Slack bridge async error:", error);
       await respond({
-        text: "❌ Sorry, something went wrong while processing your question.",
+        text: "❌ Something went wrong.",
         response_type: "ephemeral"
       });
     }
   })();
 });
 
-// Message event listener for keyword-triggered interventions
+// Message event listener (interventions)
 app.message(async ({ message, say, client }) => {
-  // Filter: Only process channel messages, ignore bot messages, threads, and edits
   if (
     message.subtype ||
     message.bot_id ||
@@ -172,9 +152,7 @@ app.message(async ({ message, say, client }) => {
     return;
   }
 
-  console.log(
-    `📨 Message received in channel ${message.channel}: "${message.text}"`
-  );
+  console.log(`📨 Message received: "${message.text}"`);
 
   try {
     const teamId = message.team;
@@ -196,7 +174,6 @@ app.message(async ({ message, say, client }) => {
 
     const { tenant_id } = await tenantRes.json();
 
-    // Call slack-intervention edge function
     const interventionRes = await fetch(
       `${SUPABASE_URL}/functions/v1/slack-intervention`,
       {
@@ -220,31 +197,32 @@ app.message(async ({ message, say, client }) => {
       }
     );
 
-    const intervention = await interventionRes.json();
-    console.log(`📥 Intervention response:`, {
-      enabled: intervention.enabled,
-      should_respond: intervention.should_respond,
-      respond_mode: intervention.respond_mode
-    });
+    // 🔍 DEBUG: Intervention fetch logging
+    console.log(`🔍 Intervention HTTP Status: ${interventionRes.status}`);
+    const responseText = await interventionRes.text();
+    console.log(`🔍 Intervention Raw Response: ${responseText}`);
 
-    // If intervention triggered, post response
+    let intervention;
+    try {
+      intervention = JSON.parse(responseText);
+    } catch (err) {
+      console.error("❌ Failed to parse intervention JSON:", err);
+      return;
+    }
+
+    console.log("📥 Intervention response:", intervention);
+
     if (intervention.should_respond && intervention.reply_text) {
-      console.log(`✅ Intervention triggered: ${intervention.respond_mode}`);
-
-      // Format sources similar to /ask
       let sourcesText = "";
-      if (intervention.sources && intervention.sources.length > 0) {
+      if (intervention.sources?.length > 0) {
         const sourcesList = intervention.sources.map((s) => {
-          const title = s.title;
-          const url = s.url;
-          return url ? `• <${url}|${title}>` : `• ${title}`;
+          return s.url ? `• <${s.url}|${s.title}>` : `• ${s.title}`;
         });
         sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
       }
 
       const fullText = `${intervention.reply_text}${sourcesText}`;
 
-      // Handle different response modes
       if (intervention.respond_mode === "ephemeral") {
         await client.chat.postEphemeral({
           channel: message.channel,
@@ -257,19 +235,15 @@ app.message(async ({ message, say, client }) => {
           thread_ts: message.thread_ts || message.ts
         });
       } else {
-        // channel_message - post as normal message
-        await say({
-          text: fullText
-        });
+        await say({ text: fullText });
       }
 
-      console.log(`🟩 Intervention response sent successfully`);
+      console.log(`🟩 Intervention response sent`);
     } else {
-      console.log(`ℹ️ No intervention needed for this message`);
+      console.log(`ℹ️ No intervention needed`);
     }
   } catch (error) {
     console.error("❌ Message intervention error:", error);
-    // Silent fail - don't post error messages for every message
   }
 });
 

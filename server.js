@@ -38,126 +38,56 @@ receiver.app.get("/health", (_req, res) => res.status(200).send("ok"));
 // Slack Bolt app
 const app = new App({ token: SLACK_BOT_TOKEN, receiver });
 
+// -----------------------------------------------------
+// Helper: Robust team ID extraction
+// -----------------------------------------------------
+function resolveTeamId({ message, command, context, body }) {
+  return (
+    command?.team_id ||
+    message?.team ||
+    message?.source_team ||
+    body?.team_id ||
+    context?.teamId ||
+    (message?.event_context ? message.event_context.split("-")[1] : null)
+  );
+}
+
+// -----------------------------------------------------
 // Slash command: /ask
-app.command("/ask", async ({ command, ack, respond }) => {
+// -----------------------------------------------------
+app.command("/ask", async ({ command, ack, respond, context, body }) => {
   await ack();
-  console.log("✅ /ask acknowledged to Slack:", command.text);
+
+  const teamId = resolveTeamId({ command, context, body });
+
+  console.log("🏷 /ask teamId =", teamId);
+
+  if (!teamId) {
+    await respond({
+      text: "❌ Could not determine Slack workspace.",
+      response_type: "ephemeral"
+    });
+    return;
+  }
+
   await respond({
     text: "⚙️ Working on it...",
     response_type: "ephemeral"
   });
 
-  (async () => {
-    const question = (command.text || "").trim();
-    const teamId = command.team_id;
+  const question = (command.text || "").trim();
 
-    if (!question) {
-      await respond({
-        text: "Type a question after `/ask`, e.g. `/ask What is our leave policy?`",
-        response_type: "ephemeral"
-      });
-      return;
-    }
-
-    try {
-      console.log(`🔍 Looking up tenant for Slack team: ${teamId}`);
-      const tenantRes = await fetch(SLACK_TENANT_LOOKUP_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: SUPABASE_ANON_KEY
-        },
-        body: JSON.stringify({ slack_team_id: teamId })
-      });
-
-      if (!tenantRes.ok) {
-        throw new Error(`Failed to resolve tenant. Status: ${tenantRes.status}`);
-      }
-
-      const { tenant_id } = await tenantRes.json();
-      console.log(`🏢 Tenant resolved: ${tenant_id}`);
-
-      const payload = { question, source: "slack" };
-      console.log("🪵 LOG: RAG payload keys:", Object.keys(payload));
-
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-
-      let ragData;
-      try {
-        const ragRes = await fetch(RAG_QUERY_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            apikey: SUPABASE_ANON_KEY,
-            "x-tenant-id": tenant_id
-          },
-          body: JSON.stringify(payload),
-          signal: controller.signal
-        });
-        clearTimeout(timeout);
-
-        console.log("📥 RAG status:", ragRes.status);
-        ragData = await ragRes.json();
-      } catch (err) {
-        clearTimeout(timeout);
-        console.error("❌ RAG fetch failed:", err);
-        await respond({
-          text: "⚠️ RAG service didn’t respond.",
-          response_type: "ephemeral"
-        });
-        return;
-      }
-
-      let answer = ragData.answer || ragData.text || "No answer found.";
-      answer = answer
-        .replace(/Source[s]?:[\s\S]*/gi, "")
-        .trim();
-
-      let sourcesText = "";
-      const sources = ragData.sources || [];
-      if (sources.length > 0) {
-        const sourcesList = sources.map((s) => {
-          const title = s.title;
-          const updated = getRelativeDate(s.updated_at);
-          const url = s.url;
-          return url
-            ? `• <${url}|${title}> (Updated: ${updated})`
-            : `• ${title} (Updated: ${updated})`;
-        });
-        sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
-      }
-
-      await respond({
-        text: `💡 *Answer to:* ${question}\n\n${answer}${sourcesText}`,
-        response_type: "ephemeral"
-      });
-    } catch (error) {
-      console.error("❌ Slack bridge async error:", error);
-      await respond({
-        text: "❌ Something went wrong.",
-        response_type: "ephemeral"
-      });
-    }
-  })();
-});
-
-// Message event listener (interventions)
-app.message(async ({ message, say, client }) => {
-  if (
-    message.subtype ||
-    message.bot_id ||
-    message.channel_type !== "channel"
-  ) {
+  if (!question) {
+    await respond({
+      text: "Type a question after `/ask`, e.g. `/ask What is our leave policy?`",
+      response_type: "ephemeral"
+    });
     return;
   }
 
-  console.log(`📨 Message received: "${message.text}"`);
-
   try {
-    const teamId = message.team;
+    console.log(`🔍 Looking up tenant for Slack team: ${teamId}`);
 
-    console.log(`🔍 Looking up tenant for message intervention`);
     const tenantRes = await fetch(SLACK_TENANT_LOOKUP_URL, {
       method: "POST",
       headers: {
@@ -168,12 +98,123 @@ app.message(async ({ message, say, client }) => {
     });
 
     if (!tenantRes.ok) {
-      console.error(`❌ Tenant lookup failed: ${tenantRes.status}`);
+      throw new Error(`Failed tenant lookup: ${tenantRes.status}`);
+    }
+
+    const { tenant_id } = await tenantRes.json();
+    console.log("🏢 Tenant =", tenant_id);
+
+    // Build RAG payload
+    const payload = { question, source: "slack" };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    const ragRes = await fetch(RAG_QUERY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_ANON_KEY,
+        "x-tenant-id": tenant_id
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeout);
+
+    const ragData = await ragRes.json();
+
+    let answer = ragData.answer || ragData.text || "No answer found.";
+    answer = answer.replace(/Source[s]?:[\s\S]*/gi, "").trim();
+
+    let sourcesText = "";
+    if (ragData.sources?.length > 0) {
+      const sourcesList = ragData.sources.map((s) => {
+        const updated = getRelativeDate(s.updated_at);
+        return s.url
+          ? `• <${s.url}|${s.title}> (Updated: ${updated})`
+          : `• ${s.title} (Updated: ${updated})`;
+      });
+      sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
+    }
+
+    await respond({
+      text: `💡 *Answer to:* ${question}\n\n${answer}${sourcesText}`,
+      response_type: "ephemeral"
+    });
+  } catch (err) {
+    console.error("❌ /ask error:", err);
+    await respond({
+      text: "❌ Something went wrong.",
+      response_type: "ephemeral"
+    });
+  }
+});
+
+// -----------------------------------------------------
+// Message event listener (interventions)
+// -----------------------------------------------------
+app.message(async ({ message, say, client, context, body }) => {
+  try {
+    if (
+      message.subtype ||
+      message.bot_id ||
+      message.channel_type !== "channel"
+    ) {
+      return;
+    }
+
+    console.log(`📨 Message received: "${message.text}"`);
+
+    // 1. Resolve Slack team ID
+    const teamId = resolveTeamId({ message, context, body });
+    console.log("🏷 Intervention teamId =", teamId);
+
+    if (!teamId) {
+      console.error("❌ Could not determine Slack team ID");
+      return;
+    }
+
+    // 2. Channel ID
+    const channelId = message.channel;
+    console.log("📺 Channel ID:", channelId);
+
+    // 3. Debug: Check token workspace matches
+    try {
+      const auth = await client.auth.test();
+      console.log("🔐 auth.test():", auth);
+      if (auth.team_id !== teamId) {
+        console.warn(
+          "⚠️ Token workspace mismatch! Token team:",
+          auth.team_id,
+          "Expected:",
+          teamId
+        );
+      }
+    } catch (err) {
+      console.error("❌ auth.test() failed:", err);
+    }
+
+    // 4. Tenant lookup
+    const tenantRes = await fetch(SLACK_TENANT_LOOKUP_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_ANON_KEY
+      },
+      body: JSON.stringify({ slack_team_id: teamId })
+    });
+
+    if (!tenantRes.ok) {
+      console.error("❌ Tenant lookup failed:", tenantRes.status);
       return;
     }
 
     const { tenant_id } = await tenantRes.json();
+    console.log("🏢 Tenant =", tenant_id);
 
+    // 5. Call intervention function
     const interventionRes = await fetch(
       `${SUPABASE_URL}/functions/v1/slack-intervention`,
       {
@@ -184,11 +225,11 @@ app.message(async ({ message, say, client }) => {
           "x-tenant-id": tenant_id
         },
         body: JSON.stringify({
-          tenant_id: tenant_id,
+          tenant_id,
           slack_team_id: teamId,
           message_text: message.text,
           metadata: {
-            channel_id: message.channel,
+            channel_id: channelId,
             thread_ts: message.thread_ts,
             user_id: message.user,
             message_ts: message.ts
@@ -197,57 +238,66 @@ app.message(async ({ message, say, client }) => {
       }
     );
 
-    // 🔍 DEBUG: Intervention fetch logging
-    console.log(`🔍 Intervention HTTP Status: ${interventionRes.status}`);
-    const responseText = await interventionRes.text();
-    console.log(`🔍 Intervention Raw Response: ${responseText}`);
+    const raw = await interventionRes.text();
+    console.log("📥 Intervention Raw:", raw);
 
     let intervention;
     try {
-      intervention = JSON.parse(responseText);
-    } catch (err) {
-      console.error("❌ Failed to parse intervention JSON:", err);
+      intervention = JSON.parse(raw);
+    } catch {
+      console.error("❌ Intervention JSON parse failed");
       return;
     }
 
-    console.log("📥 Intervention response:", intervention);
+    if (!intervention.should_respond || !intervention.reply_text) {
+      console.log("ℹ️ No intervention needed");
+      return;
+    }
 
-    if (intervention.should_respond && intervention.reply_text) {
-      let sourcesText = "";
-      if (intervention.sources?.length > 0) {
-        const sourcesList = intervention.sources.map((s) => {
-          return s.url ? `• <${s.url}|${s.title}>` : `• ${s.title}`;
-        });
-        sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
-      }
+    // Build sources text
+    let sourcesText = "";
+    if (intervention.sources?.length > 0) {
+      const sourcesList = intervention.sources.map((s) =>
+        s.url ? `• <${s.url}|${s.title}>` : `• ${s.title}`
+      );
+      sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
+    }
 
-      const fullText = `${intervention.reply_text}${sourcesText}`;
+    const fullText = `${intervention.reply_text}${sourcesText}`;
 
-      if (intervention.respond_mode === "ephemeral") {
+    // Respond mode handling
+    if (intervention.respond_mode === "ephemeral") {
+      try {
         await client.chat.postEphemeral({
-          channel: message.channel,
+          channel: channelId,
           user: message.user,
           text: fullText
         });
-      } else if (intervention.respond_mode === "thread_reply") {
+      } catch (err) {
+        console.error("❌ Ephemeral failed, falling back:", err);
         await say({
           text: fullText,
           thread_ts: message.thread_ts || message.ts
         });
-      } else {
-        await say({ text: fullText });
       }
-
-      console.log(`🟩 Intervention response sent`);
+    } else if (intervention.respond_mode === "thread_reply") {
+      await say({
+        text: fullText,
+        thread_ts: message.thread_ts || message.ts
+      });
     } else {
-      console.log(`ℹ️ No intervention needed`);
+      await say({ text: fullText });
     }
-  } catch (error) {
-    console.error("❌ Message intervention error:", error);
+
+    console.log("🟩 Intervention sent");
+  } catch (err) {
+    console.error("❌ Intervention error:", err);
   }
 });
 
-// Start the app
+// -----------------------------------------------------
+// Start the service
+// -----------------------------------------------------
 (async () => {
   await app.start(PORT);
   console.log(`⚡️ Slack bridge running on port ${PORT}`);

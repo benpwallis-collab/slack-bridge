@@ -113,6 +113,149 @@ async function getTenantAndSlackClient({ teamId }) {
 }
 
 // -----------------------------------------------------
+// Helper: format answer with feedback buttons
+// -----------------------------------------------------
+function formatAnswerBlocks(question, answer, sources, qaLogId) {
+  const blocks = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `💡 *Answer to:* ${question}\n\n${answer}`
+      }
+    }
+  ];
+
+  // Add sources if available
+  if (sources && sources.length > 0) {
+    const sourcesList = sources.map((s) => {
+      const title = s.title;
+      const updated = getRelativeDate(s.updated_at);
+      const url = s.url;
+      return url
+        ? `• <${url}|${title}> (Updated: ${updated})`
+        : `• ${title} (Updated: ${updated})`;
+    });
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Sources:*\n${sourcesList.join("\n")}`
+      }
+    });
+  }
+
+  // Add feedback buttons if we have a qa_log_id
+  if (qaLogId) {
+    blocks.push({ type: "divider" });
+    blocks.push({
+      type: "actions",
+      block_id: `feedback_${qaLogId}`,
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "👍 Helpful", emoji: true },
+          action_id: "feedback_up",
+          value: qaLogId
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "👎 Not Helpful", emoji: true },
+          action_id: "feedback_down",
+          value: qaLogId
+        }
+      ]
+    });
+  }
+
+  return blocks;
+}
+
+// -----------------------------------------------------
+// Feedback action handlers
+// -----------------------------------------------------
+app.action("feedback_up", async ({ body, ack, respond, context }) => {
+  await ack();
+  await handleFeedbackAction(body, "up", respond, context);
+});
+
+app.action("feedback_down", async ({ body, ack, respond, context }) => {
+  await ack();
+  await handleFeedbackAction(body, "down", respond, context);
+});
+
+async function handleFeedbackAction(body, feedback, respond, context) {
+  try {
+    const qaLogId = body.actions?.[0]?.value;
+    const userId = body.user?.id;
+    const teamId = body.team?.id || context?.teamId;
+
+    console.log(`📝 Feedback received: ${feedback} for qa_log_id: ${qaLogId}`);
+
+    if (!qaLogId || !teamId) {
+      console.error("❌ Missing qa_log_id or team_id for feedback");
+      return;
+    }
+
+    // Get tenant info for this workspace
+    const { tenant_id, slackClient } = await getTenantAndSlackClient({ teamId });
+
+    // Call the feedback edge function
+    const feedbackRes = await fetch(`${SUPABASE_URL}/functions/v1/feedback`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-token": INTERNAL_LOOKUP_SECRET,
+      },
+      body: JSON.stringify({
+        qa_log_id: qaLogId,
+        feedback: feedback,
+        source: "slack",
+        tenant_id: tenant_id,
+        slack_user_id: userId,
+      }),
+    });
+
+    if (!feedbackRes.ok) {
+      const errorText = await feedbackRes.text();
+      console.error("❌ Feedback submission failed:", errorText);
+    } else {
+      console.log("✅ Feedback submitted successfully");
+    }
+
+    // Update the original message to remove buttons and show acknowledgment
+    const channelId = body.channel?.id;
+    const messageTs = body.message?.ts;
+    const originalBlocks = body.message?.blocks || [];
+
+    if (channelId && messageTs) {
+      const updatedBlocks = originalBlocks
+        .filter((block) => block.type !== "actions")
+        .concat([
+          {
+            type: "context",
+            elements: [
+              {
+                type: "mrkdwn",
+                text: "✅ Thanks for your feedback!"
+              }
+            ]
+          }
+        ]);
+
+      await slackClient.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        blocks: updatedBlocks,
+        text: body.message?.text || "Answer updated"
+      });
+    }
+  } catch (error) {
+    console.error("❌ Error handling feedback action:", error);
+  }
+}
+
+// -----------------------------------------------------
 // Slash command: /ask
 // -----------------------------------------------------
 app.command("/ask", async ({ command, ack, respond, context, body }) => {
@@ -176,7 +319,7 @@ app.command("/ask", async ({ command, ack, respond, context, body }) => {
         clearTimeout(timeout);
         console.error("❌ RAG fetch failed:", err);
         await respond({
-          text: "⚠️ RAG service didn’t respond.",
+          text: "⚠️ RAG service didn't respond.",
           response_type: "ephemeral"
         });
         return;
@@ -185,24 +328,21 @@ app.command("/ask", async ({ command, ack, respond, context, body }) => {
       let answer = ragData.answer || ragData.text || "No answer found.";
       answer = answer.replace(/Source[s]?:[\s\S]*/gi, "").trim();
 
-      let sourcesText = "";
       const sources = ragData.sources || [];
-      if (sources.length > 0) {
-        const sourcesList = sources.map((s) => {
-          const title = s.title;
-          const updated = getRelativeDate(s.updated_at);
-          const url = s.url;
-          return url
-            ? `• <${url}|${title}> (Updated: ${updated})`
-            : `• ${title} (Updated: ${updated})`;
-        });
-        sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
-      }
+      const qaLogId = ragData.qa_log_id; // Extract qa_log_id from RAG response
+
+      console.log(`📤 RAG response received, qa_log_id: ${qaLogId || "none"}`);
+
+      // Use block-based response with feedback buttons
+      const blocks = formatAnswerBlocks(question, answer, sources, qaLogId);
 
       await respond({
-        text: `💡 *Answer to:* ${question}\n\n${answer}${sourcesText}`,
+        blocks: blocks,
+        text: `💡 *Answer to:* ${question}\n\n${answer}`, // Fallback text
         response_type: "ephemeral"
       });
+
+      console.log("✅ Answer sent with feedback buttons");
     } catch (error) {
       console.error("❌ Slack bridge /ask error:", error);
       await respond({

@@ -238,25 +238,40 @@ function sanitizeTextForInsights(text) {
 // Simple sentiment classification (no LLM needed)
 function classifySentiment(text) {
   const lower = text.toLowerCase();
-
+  
+  // Check for negation patterns
+  const hasNegation = /\b(not|don't|doesn't|isn't|aren't|won't|can't|couldn't|wouldn't|never|no longer)\b/.test(lower);
+  
   const negativeWords = [
-    "unsafe", "frustrated", "angry", "worried", "concerned", "problem",
-    "issue", "hate", "bad", "worst", "terrible", "disappointed", "annoyed",
-    "confused", "stuck", "broken", "failing", "urgent", "emergency"
+    // Original negative words
+    'unsafe', 'frustrated', 'angry', 'worried', 'concerned', 'problem', 
+    'issue', 'hate', 'bad', 'worst', 'terrible', 'disappointed', 'annoyed',
+    'confused', 'stuck', 'broken', 'failing', 'urgent', 'emergency',
+    // Workplace attrition signals
+    'leave', 'leaving', 'quit', 'quitting', 'resign', 'resigning', 'resigned',
+    'boring', 'bored', 'unhappy', 'tired', 'exhausted', 'overwhelmed',
+    'notice', 'exit', 'departure', 'toxic', 'burnout', 'stress', 'stressed'
   ];
-
+  
   const positiveWords = [
-    "great", "love", "excellent", "amazing", "happy", "excited", "thanks",
-    "helpful", "appreciate", "awesome", "fantastic", "perfect", "wonderful",
-    "good", "nice", "pleased", "delighted"
+    'great', 'love', 'excellent', 'amazing', 'happy', 'excited', 'thanks',
+    'helpful', 'appreciate', 'awesome', 'fantastic', 'perfect', 'wonderful',
+    'good', 'nice', 'pleased', 'delighted'
   ];
-
-  const negScore = negativeWords.filter(w => lower.includes(w)).length;
-  const posScore = positiveWords.filter(w => lower.includes(w)).length;
-
-  if (negScore > posScore) return "negative";
-  if (posScore > negScore) return "positive";
-  return "neutral";
+  
+  let negScore = negativeWords.filter(w => lower.includes(w)).length;
+  let posScore = positiveWords.filter(w => lower.includes(w)).length;
+  
+  // If negation detected and positive words found, flip them to negative
+  // e.g., "not happy" should count as negative, not positive
+  if (hasNegation && posScore > 0) {
+    negScore += posScore;
+    posScore = 0;
+  }
+  
+  if (negScore > posScore) return 'negative';
+  if (posScore > negScore) return 'positive';
+  return 'neutral';
 }
 
 // Extract non-identifying keywords

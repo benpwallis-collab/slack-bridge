@@ -234,49 +234,72 @@ function sanitizeTextForInsights(text) {
   return sanitized;
 }
 
-// Simple sentiment classification (no LLM needed)
+// ----------------------------------------------
+// Multi-label sentiment classifier (SAFE VERSION)
+// ----------------------------------------------
 function classifySentiment(text) {
-  const lower = text.toLowerCase();
-
-  const negativeWords = [
-    "unsafe", "frustrated", "angry", "worried", "concerned", "problem",
-    "issue", "hate", "bad", "worst", "terrible", "disappointed", "annoyed",
-    "confused", "stuck", "broken", "failing", "urgent", "emergency"
-  ];
-
-  const positiveWords = [
-    "great", "love", "excellent", "amazing", "happy", "excited", "thanks",
-    "helpful", "appreciate", "awesome", "fantastic", "perfect", "wonderful",
-    "good", "nice", "pleased", "delighted"
-  ];
-
-  const negScore = negativeWords.filter(w => lower.includes(w)).length;
-  const posScore = positiveWords.filter(w => lower.includes(w)).length;
-
-  if (negScore > posScore) return "negative";
-  if (posScore > negScore) return "positive";
-  return "neutral";
-}
-
-// Extract non-identifying keywords
-function extractKeywords(text) {
-  const cleaned = text.toLowerCase();
-
-  const words = cleaned.split(/\s+/).filter(w => w.length > 3);
-
-  const stopWords = new Set([
-    "this", "that", "with", "from", "have", "been", "were", "they",
-    "their", "would", "could", "should", "about", "what", "when",
-    "where", "which", "there", "here", "just", "also", "only", "some",
-    "very", "really", "actually", "basically", "literally"
-  ]);
-
-  const freq = {};
-  for (const word of words) {
-    if (!stopWords.has(word)) {
-      freq[word] = (freq[word] || 0) + 1;
-    }
+  if (!text || typeof text !== "string") {
+    return { primary: "neutral", labels: [] };
   }
+
+  const cleaned = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").trim();
+  if (!cleaned) return { primary: "neutral", labels: [] };
+
+  const tokens = cleaned.split(/\s+/);
+
+  // Category lexicons
+  const WORDS = {
+    positive: {
+      great:2, excellent:3, love:3, amazing:3, helpful:1, appreciate:2, awesome:2,
+      perfect:3, wonderful:3, happy:2, excited:1, good:1, nice:1, delighted:2
+    },
+    negative: {
+      bad:2, terrible:3, awful:3, frustrated:2, angry:2, annoyed:1, confused:1,
+      stuck:1, broken:1, failing:2, disappointed:2, unsafe:2, worried:1,
+      concerned:1, problem:1, issue:1, toxic:3
+    },
+    burnout: {
+      exhausted:3, burnout:3, overwhelmed:3, tired:1, drained:2, overloaded:2,
+      stressed:2, stress:2
+    },
+    attrition: {
+      quit:3, quitting:3, resign:3, resigning:3, resigned:3, leaving:2, leave:1,
+      exit:2, departure:2
+    },
+    conflict: {
+      fight:2, blame:2, disagree:1, conflict:2, tension:2, hostile:3
+    },
+    workload: {
+      deadline:1, pressure:1, urgent:1, overloaded:2, swamped:2, backlog:1
+    },
+    tooling: {
+      slow:1, buggy:1, broken:1, failing:2, error:1, unstable:1
+    }
+  };
+
+  let pos = 0, neg = 0;
+  const labels = new Set();
+
+  for (const token of tokens) {
+    // Positive / negative
+    if (WORDS.positive[token]) pos += WORDS.positive[token];
+    if (WORDS.negative[token]) neg += WORDS.negative[token];
+
+    // Multi-label categories
+    if (WORDS.burnout[token]) labels.add("burnout_risk");
+    if (WORDS.attrition[token]) labels.add("attrition_risk");
+    if (WORDS.conflict[token]) labels.add("conflict_risk");
+    if (WORDS.workload[token]) labels.add("workload_pressure");
+    if (WORDS.tooling[token]) labels.add("tooling_frustration");
+  }
+
+  // Primary sentiment
+  let primary = "neutral";
+  if (neg > pos) primary = "negative";
+  else if (pos > neg) primary = "positive";
+
+  return { primary, labels: Array.from(labels) };
+}
 
   return Object.entries(freq)
     .sort((a, b) => b[1] - a[1])

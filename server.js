@@ -13,6 +13,7 @@ const {
   SUPABASE_ANON_KEY,
   SUPABASE_URL,
   INTERNAL_LOOKUP_SECRET,    // shared secret with slack-tenant-lookup
+  // LOVABLE_API_KEY removed - no longer needed
   INSIGHTS_SAMPLE_RATE,      // optional, for example "0.25"
   INSIGHTS_MAX_CHARS,        // optional, for example "1500"
   INSIGHTS_MIN_CHARS_FOR_EMBEDDING, // optional, for example "20"
@@ -289,44 +290,8 @@ function hashMessage(text) {
   return crypto.createHash("sha256").update(text).digest("hex");
 }
 
-// Get embedding from Lovable AI (cheapish operation)
-async function getEmbedding(text) {
-  if (!LOVABLE_API_KEY) {
-    console.log("LOVABLE_API_KEY not set, skipping embedding");
-    return null;
-  }
-
-  try {
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        input: text,
-        model: "text-embedding-3-small"
-      })
-    });
-
-    if (!response.ok) {
-      console.error(
-        "Embedding API error:",
-        response.status,
-        await response.text().catch(() => "")
-      );
-      return null;
-    }
-
-    const data = await response.json();
-    return data.data?.[0]?.embedding || null;
-  } catch (err) {
-    console.error("Embedding generation failed:", err);
-    return null;
-  }
-}
-
 // Process message for insights (async, non-blocking) with detailed logging
+// NOTE: Embedding generation now happens server-side in insights-ingest edge function
 async function processInsightsSignal(message, tenantId) {
   try {
     console.log("🔬 Insights: Starting processing for message");
@@ -384,27 +349,19 @@ async function processInsightsSignal(message, tenantId) {
       return;
     }
 
-    console.log("🔬 Insights: Extracting anonymous signals");
+    console.log("🔬 Insights: Extracting anonymous signals locally");
 
-    // 6. Extract anonymous signals locally
-    const [embedding, sentiment, keywords] = await Promise.all([
-      getEmbedding(sanitized),
-      Promise.resolve(classifySentiment(sanitized)),
-      Promise.resolve(extractKeywords(sanitized))
-    ]);
-
-    if (!embedding) {
-      console.log("🔬 Insights: Embedding unavailable, skipping ingest");
-      return;
-    }
+    // 6. Extract anonymous signals locally (sentiment, keywords, hash)
+    // NOTE: Embedding is now generated server-side - we send sanitized_text instead
+    const sentiment = classifySentiment(sanitized);
+    const keywords = extractKeywords(sanitized);
+    const contentHash = hashMessage(sanitized);
 
     console.log(
-      `🔬 Insights: Signals ready - sentiment=${sentiment}, keywords=${JSON.stringify(
-        keywords
-      )}`
+      `🔬 Insights: Signals ready - sentiment=${sentiment}, keywords=${JSON.stringify(keywords)}`
     );
 
-    // 7. Send only anonymous signals to Supabase
+    // 7. Send sanitized_text + signals to edge function (embedding generated server-side)
     const response = await fetch(`${SUPABASE_URL}/functions/v1/insights-ingest`, {
       method: "POST",
       headers: {
@@ -413,8 +370,8 @@ async function processInsightsSignal(message, tenantId) {
       },
       body: JSON.stringify({
         tenant_id: tenantId,
-        content_hash: hashMessage(sanitized),
-        embedding,
+        content_hash: contentHash,
+        sanitized_text: sanitized,  // Server generates embedding from this, then discards it
         sentiment,
         keywords,
         source: "slack"

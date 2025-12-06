@@ -375,3 +375,325 @@ async function processInsightsSignal(message, tenantId) {
   await app.start(PORT);
   console.log(`⚡ Slack bridge running on port ${PORT}`);
 })();
+// ---------------------------------------------------------
+// FEEDBACK ACTIONS
+// ---------------------------------------------------------
+app.action("feedback_up", async ({ body, ack, respond, context }) => {
+  await ack();
+  await handleFeedbackAction(body, "up", respond, context);
+});
+
+app.action("feedback_down", async ({ body, ack, respond, context }) => {
+  await ack();
+  await handleFeedbackAction(body, "down", respond, context);
+});
+
+async function handleFeedbackAction(body, feedback, respond, context) {
+  try {
+    const qaLogId = body.actions?.[0]?.value;
+    const userId = body.user?.id;
+    const teamId = body.team?.id || context?.teamId;
+
+    console.log(`📝 Feedback received: ${feedback} for qa_log_id: ${qaLogId}`);
+
+    if (!qaLogId || !teamId) {
+      console.error("❌ Missing qa_log_id or team_id for feedback");
+      return;
+    }
+
+    const { tenant_id, slackClient } = await getTenantAndSlackClient({ teamId });
+
+    const feedbackRes = await fetch(`${SUPABASE_URL}/functions/v1/feedback`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-token": INTERNAL_LOOKUP_SECRET
+      },
+      body: JSON.stringify({
+        qa_log_id: qaLogId,
+        feedback,
+        source: "slack",
+        tenant_id,
+        slack_user_id: userId
+      })
+    });
+
+    if (!feedbackRes.ok) {
+      const errorText = await feedbackRes.text().catch(() => "");
+      console.error("❌ Feedback submission failed:", errorText);
+    } else {
+      console.log("✅ Feedback submitted successfully");
+    }
+
+    const channelId = body.channel?.id;
+    const messageTs = body.message?.ts;
+    const originalBlocks = body.message?.blocks || [];
+
+    if (channelId && messageTs) {
+      const updatedBlocks = originalBlocks
+        .filter((block) => block.type !== "actions")
+        .concat([
+          {
+            type: "context",
+            elements: [
+              {
+                type: "mrkdwn",
+                text: "✅ Thanks for your feedback!"
+              }
+            ]
+          }
+        ]);
+
+      await slackClient.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        blocks: updatedBlocks,
+        text: body.message?.text || "Answer updated"
+      });
+    }
+  } catch (error) {
+    console.error("❌ Error handling feedback action:", error);
+  }
+}
+
+// ---------------------------------------------------------
+// SLASH COMMAND: /ask
+// ---------------------------------------------------------
+app.command("/ask", async ({ command, ack, respond, context, body }) => {
+  await ack();
+  console.log("✅ /ask acknowledged to Slack:", command.text);
+
+  const teamId = resolveTeamId({ command, context, body });
+  console.log("🏷 /ask teamId =", teamId);
+
+  if (!teamId) {
+    await respond({
+      text: "❌ Could not determine Slack workspace.",
+      response_type: "ephemeral"
+    });
+    return;
+  }
+
+  await respond({
+    text: "⚙️ Working on it...",
+    response_type: "ephemeral"
+  });
+
+  (async () => {
+    const question = (command.text || "").trim();
+
+    if (!question) {
+      await respond({
+        text: "Type a question after `/ask`, for example `/ask What is our leave policy?`",
+        response_type: "ephemeral"
+      });
+      return;
+    }
+
+    try {
+      const { tenant_id } = await getTenantAndSlackClient({ teamId });
+      console.log("🏢 Tenant (for /ask) =", tenant_id);
+
+      const payload = { question, source: "slack" };
+      console.log("🪵 LOG: RAG payload keys:", Object.keys(payload));
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      let ragData;
+      try {
+        const ragRes = await fetch(RAG_QUERY_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            apikey: SUPABASE_ANON_KEY,
+            "x-tenant-id": tenant_id
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+
+        console.log("📥 RAG status:", ragRes.status);
+        ragData = await ragRes.json();
+      } catch (err) {
+        clearTimeout(timeout);
+        console.error("❌ RAG fetch failed:", err);
+        await respond({
+          text: "⚠️ RAG service did not respond.",
+          response_type: "ephemeral"
+        });
+        return;
+      }
+
+      let answer = ragData.answer || ragData.text || "No answer found.";
+      answer = answer.replace(/Source[s]?:[\s\S]*/gi, "").trim();
+
+      const sources = ragData.sources || [];
+      const qaLogId = ragData.qa_log_id;
+
+      console.log(`📤 RAG response received, qa_log_id: ${qaLogId || "none"}`);
+
+      const blocks = formatAnswerBlocks(question, answer, sources, qaLogId);
+
+      await respond({
+        blocks,
+        text: `💡 *Answer to:* ${question}\n\n${answer}`,
+        response_type: "ephemeral"
+      });
+
+      console.log("✅ Answer sent with feedback buttons");
+    } catch (error) {
+      console.error("❌ Slack bridge /ask error:", error);
+      await respond({
+        text: "❌ Something went wrong.",
+        response_type: "ephemeral"
+      });
+    }
+  })();
+});
+
+// ---------------------------------------------------------
+// MESSAGE EVENT HANDLING (INTERVENTIONS + INSIGHTS)
+// ---------------------------------------------------------
+
+// New: lightweight wrapper that returns immediately,
+// and runs the heavy work in the background to avoid 3s timeout.
+app.message((args) => {
+  handleMessageEvent(args).catch(err => {
+    console.error("❌ Background message error:", err);
+  });
+});
+
+async function handleMessageEvent({ message, client, context, body }) {
+  try {
+    if (!message || typeof message !== "object") return;
+
+    if (
+      message.subtype ||
+      message.bot_id ||
+      message.channel_type !== "channel"
+    ) {
+      return;
+    }
+
+    console.log(`📨 Message received: "${message.text}"`);
+
+    const teamId = resolveTeamId({ message, context, body });
+    console.log("🏷 Intervention teamId =", teamId);
+
+    if (!teamId) {
+      console.error("❌ Could not determine Slack team ID from event");
+      return;
+    }
+
+    const channelId = message.channel;
+    console.log("📺 Channel ID:", channelId);
+
+    const { tenant_id, slackClient } = await getTenantAndSlackClient({ teamId });
+    console.log("🏢 Tenant (intervention) =", tenant_id);
+
+    // Fire and forget passive insights
+    processInsightsSignal(message, tenant_id).catch(err => {
+      console.error("Insights background processing failed:", err);
+    });
+
+    // Call slack-intervention edge function
+    const interventionRes = await fetch(
+      `${SUPABASE_URL}/functions/v1/slack-intervention`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SUPABASE_ANON_KEY,
+          "x-tenant-id": tenant_id
+        },
+        body: JSON.stringify({
+          tenant_id,
+          slack_team_id: teamId,
+          message_text: message.text,
+          metadata: {
+            channel_id: channelId,
+            thread_ts: message.thread_ts,
+            user_id: message.user,
+            message_ts: message.ts
+          }
+        })
+      }
+    );
+
+    console.log(`🔍 Intervention HTTP Status: ${interventionRes.status}`);
+    const responseText = await interventionRes.text();
+    console.log(`🔍 Intervention Raw Response: ${responseText}`);
+
+    let intervention;
+    try {
+      intervention = JSON.parse(responseText);
+    } catch (err) {
+      console.error("❌ Failed to parse intervention JSON:", err);
+      return;
+    }
+
+    console.log("📥 Intervention response:", intervention);
+
+    if (!intervention.should_respond || !intervention.reply_text) {
+      console.log("ℹ️ No intervention needed");
+      return;
+    }
+
+    let sourcesText = "";
+    if (intervention.sources?.length > 0) {
+      const sourcesList = intervention.sources.map((s) =>
+        s.url ? `• <${s.url}|${s.title}>` : `• ${s.title}`
+      );
+      sourcesText = `\n\n*Sources:*\n${sourcesList.join("\n")}`;
+    }
+
+    const fullText = `${intervention.reply_text}${sourcesText}`;
+
+    if (intervention.respond_mode === "ephemeral") {
+      try {
+        await slackClient.chat.postEphemeral({
+          channel: channelId,
+          user: message.user,
+          text: fullText
+        });
+        console.log("🟩 Intervention ephemeral response sent");
+      } catch (err) {
+        console.error(
+          "❌ Ephemeral failed with tenant client, falling back to thread message:",
+          err
+        );
+        await slackClient.chat.postMessage({
+          channel: channelId,
+          text: fullText,
+          thread_ts: message.thread_ts || message.ts
+        });
+        console.log("🟩 Intervention thread reply (fallback) sent");
+      }
+    } else if (intervention.respond_mode === "thread_reply") {
+      await slackClient.chat.postMessage({
+        channel: channelId,
+        text: fullText,
+        thread_ts: message.thread_ts || message.ts
+      });
+      console.log("🟩 Intervention thread reply sent");
+    } else {
+      await slackClient.chat.postMessage({
+        channel: channelId,
+        text: fullText
+      });
+      console.log("🟩 Intervention channel message sent");
+    }
+  } catch (error) {
+    console.error("❌ Message intervention error:", error);
+  }
+}
+
+// ---------------------------------------------------------
+// START APP
+// ---------------------------------------------------------
+(async () => {
+  await app.start(PORT);
+  console.log(`⚡️ Slack bridge running on port ${PORT}`);
+})();

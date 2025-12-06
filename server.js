@@ -13,7 +13,6 @@ const {
   SUPABASE_ANON_KEY,
   SUPABASE_URL,
   INTERNAL_LOOKUP_SECRET,    // shared secret with slack-tenant-lookup
-  LOVABLE_API_KEY,
   INSIGHTS_SAMPLE_RATE,      // optional, for example "0.25"
   INSIGHTS_MAX_CHARS,        // optional, for example "1500"
   INSIGHTS_MIN_CHARS_FOR_EMBEDDING, // optional, for example "20"
@@ -24,8 +23,8 @@ const {
 // INSIGHTS CONFIG (SAMPLING + LIMITS)
 // ----------------------------------------------
 const INSIGHTS_SAMPLE = (() => {
-  const v = parseFloat(INSIGHTS_SAMPLE_RATE || "0.25");
-  if (Number.isNaN(v)) return 0.25;
+  const v = parseFloat(INSIGHTS_SAMPLE_RATE || "1.00");
+  if (Number.isNaN(v)) return 1.00;
   return Math.min(1, Math.max(0, v));
 })();
 
